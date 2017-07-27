@@ -8,7 +8,6 @@ const VectorTile = require('@mapbox/vector-tile').VectorTile;
 const SymbolBucket = require('../../../src/data/bucket/symbol_bucket');
 const CollisionTile = require('../../../src/symbol/collision_tile');
 const CollisionBoxArray = require('../../../src/symbol/collision_box');
-const GlyphAtlas = require('../../../src/symbol/glyph_atlas');
 const StyleLayer = require('../../../src/style/style_layer');
 const util = require('../../../src/util/util');
 const featureFilter = require('../../../src/style-spec/feature_filter');
@@ -22,11 +21,6 @@ const glyphs = JSON.parse(fs.readFileSync(path.join(__dirname, '/../../fixtures/
 /*eslint new-cap: 0*/
 const collisionBoxArray = new CollisionBoxArray();
 const collision = new CollisionTile(0, 0, 1, 1, collisionBoxArray);
-const atlas = new GlyphAtlas();
-for (const id in glyphs) {
-    glyphs[id].bitmap = true;
-    glyphs[id].rect = atlas.addGlyph(id, 'Test', glyphs[id], 3);
-}
 
 const stacks = { 'Test': glyphs };
 
@@ -130,9 +124,13 @@ test('SymbolBucket#getPaintPropertyStatistics()', (t) => {
     const options = {iconDependencies: {}, glyphDependencies: {}};
 
     bucket.populate([{feature}], options);
-    bucket.prepare(stacks, {
-        dot: { displaySize: () => [10, 10], textureRect: { x: 0, y: 0, w: 10, h: 10 }, pixelRatio: 1 }
-    });
+    bucket.prepare(
+        stacks, {},
+        {
+            dot: { sdf: false, pixelRatio: 1 }
+        }, {
+            dot: { displaySize: () => [10, 10], textureRect: { x: 0, y: 0, w: 10, h: 10 }, pixelRatio: 1 }
+        });
     bucket.place(collision);
 
     const stats = bucket.getPaintPropertyStatistics().test;
