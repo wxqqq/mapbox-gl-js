@@ -8,6 +8,8 @@ const Cache = require('../util/lru_cache');
 const Coordinate = require('../geo/coordinate');
 const util = require('../util/util');
 const EXTENT = require('../data/extent');
+const updateTileMasks = require('../render/tile_mask').updateTileMasks;
+
 
 import type {Source} from './source';
 import type Map from '../ui/map';
@@ -215,7 +217,9 @@ class SourceCache extends Evented {
         if (previousState === 'expired') tile.refreshedUponExpiration = true;
         this._setTileReloadTimer(id, tile);
         this._source.fire('data', {dataType: 'source', tile: tile, coord: tile.coord});
-
+        if (this._source.type === 'raster') {
+            updateTileMasks(util.filterObject(this._tiles, (value) => { return value.hasData(); }));
+        }
         // HACK this is necessary to fix https://github.com/mapbox/mapbox-gl-js/issues/2986
         if (this.map) this.map.painter.tileExtentVAO.vao = null;
     }
