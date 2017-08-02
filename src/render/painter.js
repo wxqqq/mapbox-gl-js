@@ -14,6 +14,7 @@ const PosArray = require('../data/pos_array');
 const ProgramConfiguration = require('../data/program_configuration');
 const shaders = require('../shaders');
 const assert = require('assert');
+const updateTileMasks = require('./tile_mask');
 
 const draw = {
     symbol: require('./draw_symbol'),
@@ -268,7 +269,14 @@ class Painter {
         this.showOverdrawInspector(options.showOverdrawInspector);
 
         this.depthRange = (style._order.length + 2) * this.numSublayers * this.depthEpsilon;
+        const rasterSources = util.filterObject(this.style.sourceCaches, (sc) => { return sc._source.type === 'raster'; });
+        for (const key in rasterSources) {
+            const sourceCache = rasterSources[key];
+            const coords = sourceCache.getVisibleCoordinates();
+            const visibleTiles = coords.map((c)=>{ return sourceCache.getTile(c); });
+            updateTileMasks(visibleTiles);
 
+        }
         this.isOpaquePass = true;
         this.renderPass();
         this.isOpaquePass = false;

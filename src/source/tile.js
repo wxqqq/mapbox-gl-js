@@ -10,10 +10,17 @@ const featureFilter = require('../style-spec/feature_filter');
 const CollisionTile = require('../symbol/collision_tile');
 const CollisionBoxArray = require('../symbol/collision_box');
 const Throttler = require('../util/throttler');
+const RasterBoundsArray = require('../data/raster_bounds_array');
+const TileCoord = require('./tile_coord');
+const EXTENT = require('../data/extent');
+const Point = require('@mapbox/point-geometry');
+const Buffer = require('../data/buffer');
+const VertexArrayObject = require('../render/vertex_array_object');
+
 
 const CLOCK_SKEW_RETRY_TIMEOUT = 30000;
 
-import type TileCoord from './tile_coord';
+
 import type {WorkerTileResult} from './worker_source';
 
 export type TileState =
@@ -274,7 +281,32 @@ class Tile {
     }
 
     setMask(mask: any) {
-        console.log(mask);
+
+        // don't redo buffer work if the mask is the same;
+        if (util.deepEqual(this.mask, mask)) return;
+        // We want to render the full tile, and keeping the segments/vertices/indices empty means
+        // using the global shared buffers for covering the entire tile.
+        this.mask = mask;
+        this.maskedRasterBoundsBuffer = undefined;
+        this.maskedRasterBoundsVAO = undefined;
+        if (util.deepEqual(mask, [0])) return;
+        const maskedBoundsArray = new RasterBoundsArray();
+
+        for (let i = 0; i < mask.length; i++) {
+            const maskCoord = TileCoord.fromID(mask[i]);
+            const vertexExtent = EXTENT >> maskCoord.z;
+            const tlVertex = new Point(maskCoord.x * vertexExtent, maskCoord.y * vertexExtent);
+            const brVertex = new Point(tlVertex.x * vertexExtent, tlVertex.y * vertexExtent);
+
+            maskedBoundsArray.emplaceBack(tlVertex.x, tlVertex.y, tlVertex.x, tlVertex.y);
+            maskedBoundsArray.emplaceBack(brVertex.x, tlVertex.y, brVertex.x, tlVertex.y);
+            maskedBoundsArray.emplaceBack(tlVertex.x, brVertex.y, tlVertex.x, brVertex.y);
+            maskedBoundsArray.emplaceBack(brVertex.x, brVertex.y, brVertex.x, brVertex.y);
+        }
+
+        this.maskedRasterBoundsBuffer = Buffer.fromStructArray(maskedBoundsArray, Buffer.BufferType.VERTEX);
+        this.maskedRasterBoundsVAO = new VertexArrayObject();
+
     }
 
     hasData() {

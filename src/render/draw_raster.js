@@ -21,7 +21,6 @@ function drawRaster(painter: Painter, sourceCache: SourceCache, layer: StyleLaye
     gl.depthFunc(gl.LESS);
 
     const minTileZ = coords.length && coords[0].z;
-
     for (let i = 0; i < coords.length; i++) {
         const coord = coords[i];
         // set the lower zoom level to sublayer 0, and higher zoom levels to higher sublayers
@@ -81,8 +80,8 @@ function drawRasterTile(painter, sourceCache, layer, coord) {
     gl.uniform1i(program.u_image0, 0);
     gl.uniform1i(program.u_image1, 1);
 
-    const buffer = tile.boundsBuffer || painter.rasterBoundsBuffer;
-    const vao = tile.boundsVAO || painter.rasterBoundsVAO;
+    const buffer = tile.maskedRasterBoundsBuffer || tile.boundsBuffer || painter.rasterBoundsBuffer;
+    const vao = tile.maskedRasterBoundsVAO || tile.boundsVAO || painter.rasterBoundsVAO;
     vao.bind(gl, program, buffer);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, buffer.length);
 }
