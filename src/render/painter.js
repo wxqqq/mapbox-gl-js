@@ -126,7 +126,7 @@ class Painter {
 
         if (this.viewportTextures.length) {
             for (let i = 0; i < this.viewportTextures.length; i++) {
-                this.gl.deleteTexture(this.viewportTextures[i]);
+                this.gl.deleteTexture(this.viewportTextures[i].texture);
             }
             this.viewportTextures = [];
         }
@@ -337,7 +337,8 @@ class Painter {
 
                 if (!fboAttached) {
                     this._setup3DFramebuffer();
-                    fboAttached = true;
+                    // Wait to flip the boolean until after we attach the first
+                    // texture and clear the depth buffer a few lines down.
                 }
 
                 let renderTarget = this.viewportTextures.pop();
@@ -346,15 +347,16 @@ class Painter {
                 }
                 renderTarget.attachToFramebuffer();
 
-                this.renderLayer(this, (sourceCache : any), layer, coords);
+                if (!fboAttached) {
+                    this.clearDepth();
+                    fboAttached = true;
+                }
+
+                this.renderLayer(this, (sourceCache: any), layer, coords);
 
                 renderTarget.detachFromFramebuffer();
 
                 this._prerenderedTextures[layerId] = renderTarget;
-            }
-
-            if (i === this.style._order3D.length - 1 && fboAttached) {
-                this.clearDepth();
             }
         }
 
