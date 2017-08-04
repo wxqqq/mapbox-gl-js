@@ -105,6 +105,7 @@ class Style extends Evented {
 
         this._layers = {};
         this._order  = [];
+        this._order3D = [];
         this.sourceCaches = {};
         this.zoomHistory = {};
         this._loaded = false;
