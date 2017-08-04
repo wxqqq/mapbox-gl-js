@@ -124,15 +124,19 @@ class Painter {
         this.height = height * browser.devicePixelRatio;
         gl.viewport(0, 0, this.width, this.height);
 
-        if (this.viewportTextures.length) {
-            for (let i = 0; i < this.viewportTextures.length; i++) {
-                this.gl.deleteTexture(this.viewportTextures[i].texture);
-            }
-            this.viewportTextures = [];
+        for (let i = 0; i < this.viewportTextures.length; i++) {
+            this.gl.deleteTexture(this.viewportTextures[i].texture);
         }
+        this.viewportTextures = [];
+
         if (this.viewportFbo) {
             this.gl.deleteFramebuffer(this.viewportFbo);
             this.viewportFbo = null;
+        }
+
+        if (this.depthRbo) {
+            this.gl.deleteRenderbuffer(this.depthRbo);
+            this.depthRbo = null;
         }
     }
 
