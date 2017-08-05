@@ -64,10 +64,13 @@ class Tile {
     placementSource: any;
     workerID: number;
     vtLayers: {[string]: VectorTileLayer};
+    mask: Array<number>;
 
     aborted: ?boolean;
     boundsBuffer: any;
     boundsVAO: any;
+    maskedRasterBoundsBuffer: any;
+    maskedRasterBoundsVAO: any;
     request: any;
     texture: any;
     sourceCache: any;
