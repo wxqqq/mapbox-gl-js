@@ -8,7 +8,7 @@ const util = require('../util/util');
 
 import type StyleLayer from '../style/style_layer';
 import type {ViewType, StructArray} from '../util/struct_array';
-import type {Program} from '../render/program';
+import type Program from '../render/program';
 
 type LayoutAttribute = {
     name: string,
