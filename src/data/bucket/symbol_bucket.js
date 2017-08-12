@@ -237,7 +237,6 @@ class SymbolBuffers {
             this.elementBuffer = new Buffer(arrays.elementArray, ElementArrayType.serialize(), Buffer.BufferType.ELEMENT);
             this.programConfigurations = ProgramConfigurationSet.deserialize(programInterface, layers, zoom, arrays.paintVertexArrays);
             this.segments = new SegmentVector(arrays.segments);
-            this.segments.createVAOs(layers);
         } else {
             this.layoutVertexArray = new LayoutVertexArrayType();
             this.elementArray = new ElementArrayType();
