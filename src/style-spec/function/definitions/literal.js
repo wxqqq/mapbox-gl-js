@@ -21,8 +21,12 @@ class Literal implements Expression {
         if (args.length !== 2)
             return context.error(`'literal' expression requires exactly one argument, but found ${args.length - 1} instead.`);
 
+        if (typeof args[1] === 'number' && Math.abs(args[1]) > Number.MAX_SAFE_INTEGER) {
+            return context.error(`Numeric values must be no larger than ${Number.MAX_SAFE_INTEGER}.`);
+        }
+
         if (!isValue(args[1]))
-            context.error(`invalid value`);
+            return context.error(`invalid value`);
 
         const value = (args[1]: any);
         let type = typeOf(value);
