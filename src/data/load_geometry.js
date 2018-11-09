@@ -1,8 +1,8 @@
 // @flow
 
-const util = require('../util/util');
-const EXTENT = require('./extent');
-const assert = require('assert');
+import { warnOnce } from '../util/util';
+
+import EXTENT from './extent';
 
 import type Point from '@mapbox/point-geometry';
 
@@ -17,24 +17,15 @@ function createBounds(bits) {
     };
 }
 
-const boundsLookup = {
-    '15': createBounds(15),
-    '16': createBounds(16)
-};
+const bounds = createBounds(16);
 
 /**
  * Loads a geometry from a VectorTileFeature and scales it to the common extent
  * used internally.
  * @param {VectorTileFeature} feature
- * @param {number} [bits=16] The number of signed integer bits available to store
- *   each coordinate. A warning will be issued if any coordinate will not fits
- *   in the specified number of bits.
  * @private
  */
-module.exports = function loadGeometry(feature: VectorTileFeature, bits?: number): Array<Array<Point>> {
-    const bounds = boundsLookup[bits || 16];
-    assert(bounds);
-
+export default function loadGeometry(feature: VectorTileFeature): Array<Array<Point>> {
     const scale = EXTENT / feature.extent;
     const geometry = feature.loadGeometry();
     for (let r = 0; r < geometry.length; r++) {
@@ -47,9 +38,9 @@ module.exports = function loadGeometry(feature: VectorTileFeature, bits?: number
             point.y = Math.round(point.y * scale);
 
             if (point.x < bounds.min || point.x > bounds.max || point.y < bounds.min || point.y > bounds.max) {
-                util.warnOnce('Geometry exceeds allowed extent, reduce your vector tile buffer size');
+                warnOnce('Geometry exceeds allowed extent, reduce your vector tile buffer size');
             }
         }
     }
     return geometry;
-};
+}

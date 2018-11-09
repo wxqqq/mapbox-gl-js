@@ -1,119 +1,97 @@
 // @flow
 
-const browser = require('../util/browser');
-const pixelsToTileUnits = require('../source/pixels_to_tile_units');
+import DepthMode from '../gl/depth_mode';
+import CullFaceMode from '../gl/cull_face_mode';
+import Texture from './texture';
+import {
+    lineUniformValues,
+    linePatternUniformValues,
+    lineSDFUniformValues,
+    lineGradientUniformValues
+} from './program/line_program';
 
 import type Painter from './painter';
 import type SourceCache from '../source/source_cache';
 import type LineStyleLayer from '../style/style_layer/line_style_layer';
 import type LineBucket from '../data/bucket/line_bucket';
-import type TileCoord from '../source/tile_coord';
+import type {OverscaledTileID} from '../source/tile_id';
 
-module.exports = function drawLine(painter: Painter, sourceCache: SourceCache, layer: LineStyleLayer, coords: Array<TileCoord>) {
-    if (painter.isOpaquePass) return;
-    painter.setDepthSublayer(0);
-    painter.depthMask(false);
+export default function drawLine(painter: Painter, sourceCache: SourceCache, layer: LineStyleLayer, coords: Array<OverscaledTileID>) {
+    if (painter.renderPass !== 'translucent') return;
 
-    const gl = painter.gl;
-    gl.enable(gl.STENCIL_TEST);
+    const opacity = layer.paint.get('line-opacity');
+    const width = layer.paint.get('line-width');
+    if (opacity.constantOr(1) === 0 || width.constantOr(1) === 0) return;
 
-    // don't draw zero-width lines
-    if (layer.paint['line-width'] <= 0) return;
+    const depthMode = painter.depthModeForSublayer(0, DepthMode.ReadOnly);
+    const colorMode = painter.colorModeForRenderPass();
+
+    const dasharray = layer.paint.get('line-dasharray');
+    const patternProperty = layer.paint.get('line-pattern');
+    const image = patternProperty.constantOr((1: any));
+
+    const gradient = layer.paint.get('line-gradient');
+    const crossfade = layer.getCrossfadeParameters();
 
     const programId =
-        layer.paint['line-dasharray'] ? 'lineSDF' :
-        layer.paint['line-pattern'] ? 'linePattern' : 'line';
+        dasharray ? 'lineSDF' :
+        image ? 'linePattern' :
+        gradient ? 'lineGradient' : 'line';
 
-    let prevTileZoom;
+    const context = painter.context;
+    const gl = context.gl;
+
     let firstTile = true;
+
+    if (gradient) {
+        context.activeTexture.set(gl.TEXTURE0);
+
+        let gradientTexture = layer.gradientTexture;
+        if (!layer.gradient) return;
+        if (!gradientTexture) gradientTexture = layer.gradientTexture = new Texture(context, layer.gradient, gl.RGBA);
+        gradientTexture.bind(gl.LINEAR, gl.CLAMP_TO_EDGE);
+    }
 
     for (const coord of coords) {
         const tile = sourceCache.getTile(coord);
+
+        if (image && !tile.patternsLoaded()) continue;
+
         const bucket: ?LineBucket = (tile.getBucket(layer): any);
         if (!bucket) continue;
 
         const programConfiguration = bucket.programConfigurations.get(layer.id);
-        const prevProgram = painter.currentProgram;
+        const prevProgram = painter.context.program.get();
         const program = painter.useProgram(programId, programConfiguration);
-        const programChanged = firstTile || program !== prevProgram;
-        const tileRatioChanged = prevTileZoom !== tile.coord.z;
+        const programChanged = firstTile || program.program !== prevProgram;
 
-        if (programChanged) {
-            programConfiguration.setUniforms(painter.gl, program, layer, {zoom: painter.transform.zoom});
+        const constantPattern = patternProperty.constantOr(null);
+        if (constantPattern && tile.imageAtlas) {
+            const posTo = tile.imageAtlas.patternPositions[constantPattern.to];
+            const posFrom = tile.imageAtlas.patternPositions[constantPattern.from];
+            if (posTo && posFrom) programConfiguration.setConstantPatternPositions(posTo, posFrom);
         }
-        drawLineTile(program, painter, tile, bucket, layer, coord, programConfiguration, programChanged, tileRatioChanged);
-        prevTileZoom = tile.coord.z;
+
+        const uniformValues = dasharray ? lineSDFUniformValues(painter, tile, layer, dasharray, crossfade) :
+            image ? linePatternUniformValues(painter, tile, layer, crossfade) :
+            gradient ? lineGradientUniformValues(painter, tile, layer) :
+            lineUniformValues(painter, tile, layer);
+
+        if (dasharray && (programChanged || painter.lineAtlas.dirty)) {
+            context.activeTexture.set(gl.TEXTURE0);
+            painter.lineAtlas.bind(context);
+        } else if (image) {
+            context.activeTexture.set(gl.TEXTURE0);
+            tile.imageAtlasTexture.bind(gl.LINEAR, gl.CLAMP_TO_EDGE);
+            programConfiguration.updatePatternPaintBuffers(crossfade);
+        }
+
+        program.draw(context, gl.TRIANGLES, depthMode,
+            painter.stencilModeForClipping(coord), colorMode, CullFaceMode.disabled, uniformValues,
+            layer.id, bucket.layoutVertexBuffer, bucket.indexBuffer, bucket.segments,
+            layer.paint, painter.transform.zoom, programConfiguration);
+
         firstTile = false;
-    }
-};
-
-function drawLineTile(program, painter, tile, bucket, layer, coord, programConfiguration, programChanged, tileRatioChanged) {
-    const gl = painter.gl;
-    const dasharray = layer.paint['line-dasharray'];
-    const image = layer.paint['line-pattern'];
-
-    let posA, posB, imagePosA, imagePosB;
-
-    if (programChanged || tileRatioChanged) {
-        const tileRatio = 1 / pixelsToTileUnits(tile, 1, painter.transform.tileZoom);
-
-        if (dasharray) {
-            posA = painter.lineAtlas.getDash(dasharray.from, layer.layout['line-cap'] === 'round');
-            posB = painter.lineAtlas.getDash(dasharray.to, layer.layout['line-cap'] === 'round');
-
-            const widthA = posA.width * dasharray.fromScale;
-            const widthB = posB.width * dasharray.toScale;
-
-            gl.uniform2f(program.u_patternscale_a, tileRatio / widthA, -posA.height / 2);
-            gl.uniform2f(program.u_patternscale_b, tileRatio / widthB, -posB.height / 2);
-            gl.uniform1f(program.u_sdfgamma, painter.lineAtlas.width / (Math.min(widthA, widthB) * 256 * browser.devicePixelRatio) / 2);
-
-        } else if (image) {
-            imagePosA = painter.spriteAtlas.getPattern(image.from);
-            imagePosB = painter.spriteAtlas.getPattern(image.to);
-            if (!imagePosA || !imagePosB) return;
-
-            gl.uniform2f(program.u_pattern_size_a, imagePosA.displaySize[0] * image.fromScale / tileRatio, imagePosB.displaySize[1]);
-            gl.uniform2f(program.u_pattern_size_b, imagePosB.displaySize[0] * image.toScale / tileRatio, imagePosB.displaySize[1]);
-            gl.uniform2fv(program.u_texsize, painter.spriteAtlas.getPixelSize());
-        }
-
-        gl.uniform2f(program.u_gl_units_to_pixels, 1 / painter.transform.pixelsToGLUnits[0], 1 / painter.transform.pixelsToGLUnits[1]);
-    }
-
-    if (programChanged) {
-
-        if (dasharray) {
-            gl.uniform1i(program.u_image, 0);
-            gl.activeTexture(gl.TEXTURE0);
-            painter.lineAtlas.bind(gl);
-
-            gl.uniform1f(program.u_tex_y_a, (posA: any).y);
-            gl.uniform1f(program.u_tex_y_b, (posB: any).y);
-            gl.uniform1f(program.u_mix, dasharray.t);
-
-        } else if (image) {
-            gl.uniform1i(program.u_image, 0);
-            gl.activeTexture(gl.TEXTURE0);
-            painter.spriteAtlas.bind(gl, true);
-
-            gl.uniform2fv(program.u_pattern_tl_a, (imagePosA: any).tl);
-            gl.uniform2fv(program.u_pattern_br_a, (imagePosA: any).br);
-            gl.uniform2fv(program.u_pattern_tl_b, (imagePosB: any).tl);
-            gl.uniform2fv(program.u_pattern_br_b, (imagePosB: any).br);
-            gl.uniform1f(program.u_fade, image.t);
-        }
-    }
-
-    painter.enableTileClippingMask(coord);
-
-    const posMatrix = painter.translatePosMatrix(coord.posMatrix, tile, layer.paint['line-translate'], layer.paint['line-translate-anchor']);
-    gl.uniformMatrix4fv(program.u_matrix, false, posMatrix);
-
-    gl.uniform1f(program.u_ratio, 1 / pixelsToTileUnits(tile, 1, painter.transform.zoom));
-
-    for (const segment of bucket.segments.get()) {
-        segment.vaos[layer.id].bind(gl, program, bucket.layoutVertexBuffer, bucket.elementBuffer, programConfiguration.paintVertexBuffer, segment.vertexOffset);
-        gl.drawElements(gl.TRIANGLES, segment.primitiveLength * 3, gl.UNSIGNED_SHORT, segment.primitiveOffset * 3 * 2);
+        // once refactored so that bound texture state is managed, we'll also be able to remove this firstTile/programChanged logic
     }
 }

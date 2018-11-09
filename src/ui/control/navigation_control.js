@@ -1,17 +1,28 @@
 // @flow
 
-const DOM = require('../../util/dom');
-const window = require('../../util/window');
-const util = require('../../util/util');
+import DOM from '../../util/dom';
+import { extend, bindAll } from '../../util/util';
+import DragRotateHandler from '../handler/drag_rotate';
 
 import type Map from '../map';
 
-const className = 'mapboxgl-ctrl';
+type Options = {
+    showCompass?: boolean,
+    showZoom?: boolean
+};
+
+const defaultOptions: Options = {
+    showCompass: true,
+    showZoom: true
+};
 
 /**
  * A `NavigationControl` control contains zoom buttons and a compass.
  *
  * @implements {IControl}
+ * @param {Object} [options]
+ * @param {Boolean} [options.showCompass=true] If `true` the compass button is included.
+ * @param {Boolean} [options.showZoom=true] If `true` the zoom-in and zoom-out buttons are included.
  * @example
  * var nav = new mapboxgl.NavigationControl();
  * map.addControl(nav, 'top-left');
@@ -20,16 +31,31 @@ const className = 'mapboxgl-ctrl';
  */
 class NavigationControl {
     _map: Map;
+    options: Options;
     _container: HTMLElement;
     _zoomInButton: HTMLElement;
     _zoomOutButton: HTMLElement;
     _compass: HTMLElement;
     _compassArrow: HTMLElement;
+    _handler: DragRotateHandler;
 
-    constructor() {
-        util.bindAll([
-            '_rotateCompassArrow'
-        ], this);
+    constructor(options: Options) {
+        this.options = extend({}, defaultOptions, options);
+
+        this._container = DOM.create('div', 'mapboxgl-ctrl mapboxgl-ctrl-group');
+        this._container.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        if (this.options.showZoom) {
+            this._zoomInButton = this._createButton('mapboxgl-ctrl-icon mapboxgl-ctrl-zoom-in', 'Zoom in', () => this._map.zoomIn());
+            this._zoomOutButton = this._createButton('mapboxgl-ctrl-icon mapboxgl-ctrl-zoom-out', 'Zoom out', () => this._map.zoomOut());
+        }
+        if (this.options.showCompass) {
+            bindAll([
+                '_rotateCompassArrow'
+            ], this);
+            this._compass = this._createButton('mapboxgl-ctrl-icon mapboxgl-ctrl-compass', 'Reset bearing to north', () => this._map.resetNorth());
+            this._compassArrow = DOM.create('span', 'mapboxgl-ctrl-compass-arrow', this._compass);
+        }
     }
 
     _rotateCompassArrow() {
@@ -39,93 +65,36 @@ class NavigationControl {
 
     onAdd(map: Map) {
         this._map = map;
-        this._container = DOM.create('div', `${className} ${className}-group`, map.getContainer());
-        this._container.addEventListener('contextmenu', this._onContextMenu.bind(this));
-
-        this._zoomInButton = this._createButton(`${className}-icon ${className}-zoom-in`, 'Zoom In', map.zoomIn.bind(map));
-        this._zoomOutButton = this._createButton(`${className}-icon ${className}-zoom-out`, 'Zoom Out', map.zoomOut.bind(map));
-        this._compass = this._createButton(`${className}-icon ${className}-compass`, 'Reset North', map.resetNorth.bind(map));
-
-        this._compassArrow = DOM.create('span', `${className}-compass-arrow`, this._compass);
-
-        this._compass.addEventListener('mousedown', this._onCompassDown.bind(this));
-
-        util.bindAll(['_onCompassMove', '_onCompassUp'], this);
-
-        this._map.on('rotate', this._rotateCompassArrow);
-        this._rotateCompassArrow();
-
+        if (this.options.showCompass) {
+            this._map.on('rotate', this._rotateCompassArrow);
+            this._rotateCompassArrow();
+            this._handler = new DragRotateHandler(map, {button: 'left', element: this._compass});
+            DOM.addEventListener(this._compass, 'mousedown', this._handler.onMouseDown);
+            this._handler.enable();
+        }
         return this._container;
     }
 
     onRemove() {
         DOM.remove(this._container);
-        this._map.off('rotate', this._rotateCompassArrow);
-        this._map = (undefined: any);
-    }
+        if (this.options.showCompass) {
+            this._map.off('rotate', this._rotateCompassArrow);
+            DOM.removeEventListener(this._compass, 'mousedown', this._handler.onMouseDown);
+            this._handler.disable();
+            delete this._handler;
+        }
 
-    _onContextMenu(e: MouseEvent) {
-        e.preventDefault();
-    }
-
-    _onCompassDown(e: MouseEvent) {
-        if (e.button !== 0) return;
-
-        DOM.disableDrag();
-        window.document.addEventListener('mousemove', this._onCompassMove);
-        window.document.addEventListener('mouseup', this._onCompassUp);
-
-        this._map.getCanvasContainer().dispatchEvent(copyMouseEvent(e));
-        e.stopPropagation();
-    }
-
-    _onCompassMove(e: MouseEvent) {
-        if (e.button !== 0) return;
-
-        this._map.getCanvasContainer().dispatchEvent(copyMouseEvent(e));
-        e.stopPropagation();
-    }
-
-    _onCompassUp(e: MouseEvent) {
-        if (e.button !== 0) return;
-
-        window.document.removeEventListener('mousemove', this._onCompassMove);
-        window.document.removeEventListener('mouseup', this._onCompassUp);
-        DOM.enableDrag();
-
-        this._map.getCanvasContainer().dispatchEvent(copyMouseEvent(e));
-        e.stopPropagation();
+        delete this._map;
     }
 
     _createButton(className: string, ariaLabel: string, fn: () => mixed) {
         const a = DOM.create('button', className, this._container);
         a.type = 'button';
+        a.title = ariaLabel;
         a.setAttribute('aria-label', ariaLabel);
-        a.addEventListener('click', () => { fn(); });
+        a.addEventListener('click', fn);
         return a;
     }
-
 }
 
-module.exports = NavigationControl;
-
-function copyMouseEvent(e) {
-    return new window.MouseEvent(e.type, {
-        button: 2,    // right click
-        buttons: 2,   // right click
-        bubbles: true,
-        cancelable: true,
-        detail: e.detail,
-        view: e.view,
-        screenX: e.screenX,
-        screenY: e.screenY,
-        clientX: e.clientX,
-        clientY: e.clientY,
-        movementX: e.movementX,
-        movementY: e.movementY,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-        metaKey: e.metaKey
-    });
-}
+export default NavigationControl;

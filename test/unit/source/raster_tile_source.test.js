@@ -1,13 +1,13 @@
-'use strict';
-const test = require('mapbox-gl-js-test').test;
-const RasterTileSource = require('../../../src/source/raster_tile_source');
-const window = require('../../../src/util/window');
-const TileCoord = require('../../../src/source/tile_coord');
+import { test } from 'mapbox-gl-js-test';
+import RasterTileSource from '../../../src/source/raster_tile_source';
+import window from '../../../src/util/window';
+import { OverscaledTileID } from '../../../src/source/tile_id';
 
 function createSource(options, transformCallback) {
-    const source = new RasterTileSource('id', options, { send: function() {} }, options.eventedParent);
+    const source = new RasterTileSource('id', options, { send() {} }, options.eventedParent);
     source.onAdd({
         transform: { angle: 0, pitch: 0, showCollisionBoxes: false },
+        _getMapId: () => 1,
         _transformRequest: transformCallback ? transformCallback : (url) => { return { url }; }
     });
 
@@ -49,32 +49,41 @@ test('RasterTileSource', (t) => {
         t.end();
     });
 
-    t.test('respects TileJSON.bounds', (t)=>{
+    t.test('respects TileJSON.bounds', (t) => {
         const source = createSource({
             minzoom: 0,
             maxzoom: 22,
             attribution: "Mapbox",
             tiles: ["http://example.com/{z}/{x}/{y}.png"],
+            bounds: [-47, -7, -45, -5]
         });
-        source.setBounds([-47, -7, -45, -5]);
-        t.false(source.hasTile({z: 8, x:96, y: 132}), 'returns false for tiles outside bounds');
-        t.true(source.hasTile({z: 8, x:95, y: 132}), 'returns true for tiles inside bounds');
-        t.end();
+        source.on('data', (e) => {
+            if (e.sourceDataType === 'metadata') {
+                t.false(source.hasTile(new OverscaledTileID(8, 0, 8, 96, 132)), 'returns false for tiles outside bounds');
+                t.true(source.hasTile(new OverscaledTileID(8, 0, 8, 95, 132)), 'returns true for tiles inside bounds');
+                t.end();
+            }
+        });
     });
 
-    t.test('does not error on invalid bounds', (t)=>{
+    t.test('does not error on invalid bounds', (t) => {
         const source = createSource({
             minzoom: 0,
             maxzoom: 22,
             attribution: "Mapbox",
             tiles: ["http://example.com/{z}/{x}/{y}.png"],
+            bounds: [-47, -7, -45, 91]
         });
-        source.setBounds([-47, -7, -45, 91]);
-        t.deepEqual(source.tileBounds.bounds, {_sw:{lng: -47, lat: -7}, _ne:{lng: -45, lat: 90}}, 'converts invalid bounds to closest valid bounds');
-        t.end();
+
+        source.on('data', (e) => {
+            if (e.sourceDataType === 'metadata') {
+                t.deepEqual(source.tileBounds.bounds, {_sw:{lng: -47, lat: -7}, _ne:{lng: -45, lat: 90}}, 'converts invalid bounds to closest valid bounds');
+                t.end();
+            }
+        });
     });
 
-    t.test('respects TileJSON.bounds when loaded from TileJSON', (t)=>{
+    t.test('respects TileJSON.bounds when loaded from TileJSON', (t) => {
         window.server.respondWith('/source.json', JSON.stringify({
             minzoom: 0,
             maxzoom: 22,
@@ -86,8 +95,8 @@ test('RasterTileSource', (t) => {
 
         source.on('data', (e) => {
             if (e.sourceDataType === 'metadata') {
-                t.false(source.hasTile({z: 8, x:96, y: 132}), 'returns false for tiles outside bounds');
-                t.true(source.hasTile({z: 8, x:95, y: 132}), 'returns true for tiles inside bounds');
+                t.false(source.hasTile(new OverscaledTileID(8, 0, 8, 96, 132)), 'returns false for tiles outside bounds');
+                t.true(source.hasTile(new OverscaledTileID(8, 0, 8, 95, 132)), 'returns true for tiles inside bounds');
                 t.end();
             }
         });
@@ -107,10 +116,10 @@ test('RasterTileSource', (t) => {
         source.on('data', (e) => {
             if (e.sourceDataType === 'metadata') {
                 const tile = {
-                    coord: new TileCoord(10, 5, 5, 0),
+                    tileID: new OverscaledTileID(10, 0, 10, 5, 5),
                     state: 'loading',
-                    loadVectorData: function () {},
-                    setExpiryData: function() {}
+                    loadVectorData () {},
+                    setExpiryData() {}
                 };
                 source.loadTile(tile, () => {});
                 t.ok(transformSpy.calledOnce);
@@ -121,6 +130,13 @@ test('RasterTileSource', (t) => {
         });
         window.server.respond();
     });
-    t.end();
 
+    t.test('cancels TileJSON request if removed', (t) => {
+        const source = createSource({ url: "/source.json" });
+        source.onRemove();
+        t.equal(window.server.lastRequest.aborted, true);
+        t.end();
+    });
+
+    t.end();
 });

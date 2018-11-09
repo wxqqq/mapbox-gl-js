@@ -1,62 +1,51 @@
 // @flow
 
-const browser = require('../util/browser');
-const pixelsToTileUnits = require('../source/pixels_to_tile_units');
+import StencilMode from '../gl/stencil_mode';
+import DepthMode from '../gl/depth_mode';
+import CullFaceMode from '../gl/cull_face_mode';
+import { circleUniformValues } from './program/circle_program';
 
 import type Painter from './painter';
 import type SourceCache from '../source/source_cache';
 import type CircleStyleLayer from '../style/style_layer/circle_style_layer';
 import type CircleBucket from '../data/bucket/circle_bucket';
-import type TileCoord from '../source/tile_coord';
+import type {OverscaledTileID} from '../source/tile_id';
 
-module.exports = drawCircles;
+export default drawCircles;
 
-function drawCircles(painter: Painter, sourceCache: SourceCache, layer: CircleStyleLayer, coords: Array<TileCoord>) {
-    if (painter.isOpaquePass) return;
+function drawCircles(painter: Painter, sourceCache: SourceCache, layer: CircleStyleLayer, coords: Array<OverscaledTileID>) {
+    if (painter.renderPass !== 'translucent') return;
 
-    const gl = painter.gl;
+    const opacity = layer.paint.get('circle-opacity');
+    const strokeWidth = layer.paint.get('circle-stroke-width');
+    const strokeOpacity = layer.paint.get('circle-stroke-opacity');
 
-    painter.setDepthSublayer(0);
-    painter.depthMask(false);
+    if (opacity.constantOr(1) === 0 && (strokeWidth.constantOr(1) === 0 || strokeOpacity.constantOr(1) === 0)) {
+        return;
+    }
 
-    // Allow circles to be drawn across boundaries, so that
-    // large circles are not clipped to tiles
-    gl.disable(gl.STENCIL_TEST);
+    const context = painter.context;
+    const gl = context.gl;
+
+    const depthMode = painter.depthModeForSublayer(0, DepthMode.ReadOnly);
+    // Turn off stencil testing to allow circles to be drawn across boundaries,
+    // so that large circles are not clipped to tiles
+    const stencilMode = StencilMode.disabled;
+    const colorMode = painter.colorModeForRenderPass();
 
     for (let i = 0; i < coords.length; i++) {
         const coord = coords[i];
 
         const tile = sourceCache.getTile(coord);
-        const bucket: ?CircleBucket = (tile.getBucket(layer): any);
+        const bucket: ?CircleBucket<*> = (tile.getBucket(layer): any);
         if (!bucket) continue;
 
         const programConfiguration = bucket.programConfigurations.get(layer.id);
         const program = painter.useProgram('circle', programConfiguration);
-        programConfiguration.setUniforms(gl, program, layer, {zoom: painter.transform.zoom});
 
-        gl.uniform1f(program.u_camera_to_center_distance, painter.transform.cameraToCenterDistance);
-        gl.uniform1i(program.u_scale_with_map, layer.paint['circle-pitch-scale'] === 'map' ? 1 : 0);
-        if (layer.paint['circle-pitch-alignment'] === 'map') {
-            gl.uniform1i(program.u_pitch_with_map, 1);
-            const pixelRatio = pixelsToTileUnits(tile, 1, painter.transform.zoom);
-            gl.uniform2f(program.u_extrude_scale, pixelRatio, pixelRatio);
-        } else {
-            gl.uniform1i(program.u_pitch_with_map, 0);
-            gl.uniform2fv(program.u_extrude_scale, painter.transform.pixelsToGLUnits);
-        }
-
-        gl.uniform1f(program.u_devicepixelratio, browser.devicePixelRatio);
-
-        gl.uniformMatrix4fv(program.u_matrix, false, painter.translatePosMatrix(
-            coord.posMatrix,
-            tile,
-            layer.paint['circle-translate'],
-            layer.paint['circle-translate-anchor']
-        ));
-
-        for (const segment of bucket.segments.get()) {
-            segment.vaos[layer.id].bind(gl, program, bucket.layoutVertexBuffer, bucket.elementBuffer, programConfiguration.paintVertexBuffer, segment.vertexOffset);
-            gl.drawElements(gl.TRIANGLES, segment.primitiveLength * 3, gl.UNSIGNED_SHORT, segment.primitiveOffset * 3 * 2);
-        }
+        program.draw(context, gl.TRIANGLES, depthMode, stencilMode, colorMode, CullFaceMode.disabled,
+            circleUniformValues(painter, coord, tile, layer), layer.id,
+            bucket.layoutVertexBuffer, bucket.indexBuffer, bucket.segments,
+            layer.paint, painter.transform.zoom, programConfiguration);
     }
 }

@@ -1,10 +1,10 @@
 
-const ValidationError = require('../error/validation_error');
-const unbundle = require('../util/unbundle_jsonlint');
-const validateObject = require('./validate_object');
-const validateEnum = require('./validate_enum');
+import ValidationError from '../error/validation_error';
+import { unbundle } from '../util/unbundle_jsonlint';
+import validateObject from './validate_object';
+import validateEnum from './validate_enum';
 
-module.exports = function validateSource(options) {
+export default function validateSource(options) {
     const value = options.value;
     const key = options.key;
     const styleSpec = options.styleSpec;
@@ -20,17 +20,18 @@ module.exports = function validateSource(options) {
     switch (type) {
     case 'vector':
     case 'raster':
+    case 'raster-dem':
         errors = errors.concat(validateObject({
-            key: key,
-            value: value,
-            valueSpec: styleSpec.source_tile,
+            key,
+            value,
+            valueSpec: styleSpec[`source_${type.replace('-', '_')}`],
             style: options.style,
-            styleSpec: styleSpec
+            styleSpec
         }));
         if ('url' in value) {
             for (const prop in value) {
                 if (['type', 'url', 'tileSize'].indexOf(prop) < 0) {
-                    errors.push(new ValidationError(`${key}.${prop}`, value[prop], 'a source with a "url" property may not include a "%s" property', prop));
+                    errors.push(new ValidationError(`${key}.${prop}`, value[prop], `a source with a "url" property may not include a "${prop}" property`));
                 }
             }
         }
@@ -38,47 +39,42 @@ module.exports = function validateSource(options) {
 
     case 'geojson':
         return validateObject({
-            key: key,
-            value: value,
+            key,
+            value,
             valueSpec: styleSpec.source_geojson,
-            style: style,
-            styleSpec: styleSpec
+            style,
+            styleSpec
         });
 
     case 'video':
         return validateObject({
-            key: key,
-            value: value,
+            key,
+            value,
             valueSpec: styleSpec.source_video,
-            style: style,
-            styleSpec: styleSpec
+            style,
+            styleSpec
         });
 
     case 'image':
         return validateObject({
-            key: key,
-            value: value,
+            key,
+            value,
             valueSpec: styleSpec.source_image,
-            style: style,
-            styleSpec: styleSpec
+            style,
+            styleSpec
         });
 
     case 'canvas':
-        return validateObject({
-            key: key,
-            value: value,
-            valueSpec: styleSpec.source_canvas,
-            style: style,
-            styleSpec: styleSpec
-        });
+        errors.push(new ValidationError(key, null, `Please use runtime APIs to add canvas sources, rather than including them in stylesheets.`, 'source.canvas'));
+        return errors;
 
     default:
         return validateEnum({
             key: `${key}.type`,
             value: value.type,
-            valueSpec: {values: ['vector', 'raster', 'geojson', 'video', 'image', 'canvas']},
-            style: style,
-            styleSpec: styleSpec
+            valueSpec: {values: ['vector', 'raster', 'raster-dem', 'geojson', 'video', 'image']},
+            style,
+            styleSpec
         });
     }
-};
+}

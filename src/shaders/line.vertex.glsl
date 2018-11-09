@@ -12,7 +12,7 @@
 // #define scale 63.0
 #define scale 0.015873016
 
-attribute vec3 a_pos_normal;
+attribute vec4 a_pos_normal;
 attribute vec4 a_data;
 
 uniform mat4 u_matrix;
@@ -22,6 +22,7 @@ uniform vec2 u_gl_units_to_pixels;
 varying vec2 v_normal;
 varying vec2 v_width2;
 varying float v_gamma_scale;
+varying highp float v_linesofar;
 
 #pragma mapbox: define highp vec4 color
 #pragma mapbox: define lowp float blur
@@ -41,14 +42,13 @@ void main() {
     vec2 a_extrude = a_data.xy - 128.0;
     float a_direction = mod(a_data.z, 4.0) - 1.0;
 
+    v_linesofar = (floor(a_data.z / 4.0) + a_data.w * 64.0) * 2.0;
+
     vec2 pos = a_pos_normal.xy;
 
-    // transform y normal so that 0 => -1 and 1 => 1
-    // In the texture normal, x is 0 if the normal points straight up/down and 1 if it's a round cap
+    // x is 1 if it's a round cap, 0 otherwise
     // y is 1 if the normal points up, and -1 if it points down
-    mediump vec2 normal = unpack_float(a_pos_normal.z);
-    normal.y = sign(normal.y - 0.5);
-
+    mediump vec2 normal = a_pos_normal.zw;
     v_normal = normal;
 
     // these transformations used to be applied in the JS and native code bases.
@@ -58,7 +58,7 @@ void main() {
     offset = -1.0 * offset;
 
     float inset = gapwidth + (gapwidth > 0.0 ? ANTIALIASING : 0.0);
-    float outset = gapwidth + halfwidth * (gapwidth > 0.0 ? 2.0 : 1.0) + ANTIALIASING;
+    float outset = gapwidth + halfwidth * (gapwidth > 0.0 ? 2.0 : 1.0) + (halfwidth == 0.0 ? 0.0 : ANTIALIASING);
 
     // Scale the extrusion vector down to a normal and then up by the line width
     // of this vertex.

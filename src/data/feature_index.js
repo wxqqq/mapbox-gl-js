@@ -1,63 +1,43 @@
 // @flow
 
-const assert = require('assert');
-const Point = require('@mapbox/point-geometry');
-const loadGeometry = require('./load_geometry');
-const EXTENT = require('./extent');
-const featureFilter = require('../style-spec/feature_filter');
-const createStructArrayType = require('../util/struct_array');
-const Grid = require('grid-index');
-const DictionaryCoder = require('../util/dictionary_coder');
-const vt = require('@mapbox/vector-tile');
-const Protobuf = require('pbf');
-const GeoJSONFeature = require('../util/vectortile_to_geojson');
-const arraysIntersect = require('../util/util').arraysIntersect;
+import Point from '@mapbox/point-geometry';
 
-const intersection = require('../util/intersection_tests');
-const multiPolygonIntersectsBufferedMultiPoint = intersection.multiPolygonIntersectsBufferedMultiPoint;
-const multiPolygonIntersectsMultiPolygon = intersection.multiPolygonIntersectsMultiPolygon;
-const multiPolygonIntersectsBufferedMultiLine = intersection.multiPolygonIntersectsBufferedMultiLine;
+import loadGeometry from './load_geometry';
+import EXTENT from './extent';
+import featureFilter from '../style-spec/feature_filter';
+import Grid from 'grid-index';
+import DictionaryCoder from '../util/dictionary_coder';
+import vt from '@mapbox/vector-tile';
+import Protobuf from 'pbf';
+import GeoJSONFeature from '../util/vectortile_to_geojson';
+import { arraysIntersect } from '../util/util';
+import { OverscaledTileID } from '../source/tile_id';
+import { register } from '../util/web_worker_transfer';
+import EvaluationParameters from '../style/evaluation_parameters';
+import SourceFeatureState from '../source/source_state';
 
-import type CollisionTile from '../symbol/collision_tile';
-import type TileCoord from '../source/tile_coord';
-import type {PaintPropertyStatistics} from './program_configuration';
 import type StyleLayer from '../style/style_layer';
-import type {SerializedStructArray} from '../util/struct_array';
+import type {FeatureFilter} from '../style-spec/feature_filter';
+import type Transform from '../geo/transform';
+import type {FilterSpecification} from '../style-spec/types';
 
-const FeatureIndexArray = createStructArrayType({
-    members: [
-        // the index of the feature in the original vectortile
-        { type: 'Uint32', name: 'featureIndex' },
-        // the source layer the feature appears in
-        { type: 'Uint16', name: 'sourceLayerIndex' },
-        // the bucket the feature appears in
-        { type: 'Uint16', name: 'bucketIndex' }
-    ]
-});
+import { FeatureIndexArray } from './array_types';
 
 type QueryParameters = {
     scale: number,
-    bearing: number,
+    posMatrix: Float32Array,
+    transform: Transform,
     tileSize: number,
-    queryGeometry: Array<Array<{x: number, y: number}>>,
+    queryGeometry: Array<Array<Point>>,
+    queryPadding: number,
     params: {
         filter: FilterSpecification,
         layers: Array<string>,
     }
 }
 
-export type SerializedFeatureIndex = {
-    coord: TileCoord,
-    overscaling: number,
-    grid: ArrayBuffer,
-    featureIndexArray: SerializedStructArray,
-    bucketLayerIDs: Array<Array<string>>,
-    paintPropertyStatistics: PaintPropertyStatistics
-}
-
 class FeatureIndex {
-    coord: TileCoord;
-    overscaling: number;
+    tileID: OverscaledTileID;
     x: number;
     y: number;
     z: number;
@@ -66,46 +46,24 @@ class FeatureIndex {
 
     rawTileData: ArrayBuffer;
     bucketLayerIDs: Array<Array<string>>;
-    paintPropertyStatistics: PaintPropertyStatistics;
 
-    collisionTile: CollisionTile;
     vtLayers: {[string]: VectorTileLayer};
     sourceLayerCoder: DictionaryCoder;
 
-    static deserialize(serialized: SerializedFeatureIndex,
-                       rawTileData: ArrayBuffer,
-                       collisionTile: CollisionTile) {
-        const self = new FeatureIndex(
-            serialized.coord,
-            serialized.overscaling,
-            new Grid(serialized.grid),
-            new FeatureIndexArray(serialized.featureIndexArray));
-
-        self.rawTileData = rawTileData;
-        self.bucketLayerIDs = serialized.bucketLayerIDs;
-        self.paintPropertyStatistics = serialized.paintPropertyStatistics;
-        self.setCollisionTile(collisionTile);
-
-        return self;
-    }
-
-    constructor(coord: TileCoord,
-                overscaling: number,
+    constructor(tileID: OverscaledTileID,
                 grid?: Grid,
                 featureIndexArray?: FeatureIndexArray) {
-        this.coord = coord;
-        this.overscaling = overscaling;
-        this.x = coord.x;
-        this.y = coord.y;
-        this.z = coord.z - Math.log(overscaling) / Math.LN2;
+        this.tileID = tileID;
+        this.x = tileID.canonical.x;
+        this.y = tileID.canonical.y;
+        this.z = tileID.canonical.z;
         this.grid = grid || new Grid(EXTENT, 16, 0);
         this.featureIndexArray = featureIndexArray || new FeatureIndexArray();
     }
 
-    insert(feature: VectorTileFeature, featureIndex: number, sourceLayerIndex: number, bucketIndex: number) {
+    insert(feature: VectorTileFeature, geometry: Array<Array<Point>>, featureIndex: number, sourceLayerIndex: number, bucketIndex: number) {
         const key = this.featureIndexArray.length;
         this.featureIndexArray.emplaceBack(featureIndex, sourceLayerIndex, bucketIndex);
-        const geometry = loadGeometry(feature);
 
         for (let r = 0; r < geometry.length; r++) {
             const ring = geometry[r];
@@ -119,75 +77,33 @@ class FeatureIndex {
                 bbox[3] = Math.max(bbox[3], p.y);
             }
 
-            this.grid.insert(key, bbox[0], bbox[1], bbox[2], bbox[3]);
+            if (bbox[0] < EXTENT &&
+                bbox[1] < EXTENT &&
+                bbox[2] >= 0 &&
+                bbox[3] >= 0) {
+                this.grid.insert(key, bbox[0], bbox[1], bbox[2], bbox[3]);
+            }
         }
     }
 
-    setCollisionTile(collisionTile: CollisionTile) {
-        this.collisionTile = collisionTile;
-    }
-
-    serialize(transferables?: Array<Transferable>): SerializedFeatureIndex {
-        const grid = this.grid.toArrayBuffer();
-        if (transferables) {
-            transferables.push(grid);
-        }
-        return {
-            coord: this.coord,
-            overscaling: this.overscaling,
-            grid: grid,
-            featureIndexArray: this.featureIndexArray.serialize(transferables),
-            bucketLayerIDs: this.bucketLayerIDs,
-            paintPropertyStatistics: this.paintPropertyStatistics
-        };
-    }
-
-    // Finds features in this tile at a particular position.
-    query(args: QueryParameters, styleLayers: {[string]: StyleLayer}) {
+    loadVTLayers(): {[string]: VectorTileLayer} {
         if (!this.vtLayers) {
             this.vtLayers = new vt.VectorTile(new Protobuf(this.rawTileData)).layers;
             this.sourceLayerCoder = new DictionaryCoder(this.vtLayers ? Object.keys(this.vtLayers).sort() : ['_geojsonTileLayer']);
         }
+        return this.vtLayers;
+    }
 
-        const result = {};
+    // Finds non-symbol features in this tile at a particular position.
+    query(args: QueryParameters, styleLayers: {[string]: StyleLayer}, sourceFeatureState: SourceFeatureState): {[string]: Array<{ featureIndex: number, feature: GeoJSONFeature }>} {
+        this.loadVTLayers();
 
         const params = args.params || {},
             pixelsToTileUnits = EXTENT / args.tileSize / args.scale,
             filter = featureFilter(params.filter);
 
-        // Features are indexed their original geometries. The rendered geometries may
-        // be buffered, translated or offset. Figure out how much the search radius needs to be
-        // expanded by to include these features.
-        let additionalRadius = 0;
-        for (const id in styleLayers) {
-            // Since FeatureIndex is owned by a particular tile, make sure we
-            // only consider style layers whose data are present.
-            if (!this.hasLayer(id)) continue;
-
-            const styleLayer = styleLayers[id];
-
-            let styleLayerDistance = 0;
-            if (styleLayer.type === 'line') {
-                const width = getLineWidth(this.getPaintValue('line-width', styleLayer),
-                    this.getPaintValue('line-gap-width', styleLayer));
-                const offset = this.getPaintValue('line-offset', styleLayer);
-                const translate = this.getPaintValue('line-translate', styleLayer);
-                styleLayerDistance = width / 2 + Math.abs(offset) + translateDistance(translate);
-            } else if (styleLayer.type === 'fill') {
-                styleLayerDistance = translateDistance(this.getPaintValue('fill-translate', styleLayer));
-            } else if (styleLayer.type === 'fill-extrusion') {
-                styleLayerDistance = translateDistance(this.getPaintValue('fill-extrusion-translate', styleLayer));
-            } else if (styleLayer.type === 'circle') {
-                styleLayerDistance = this.getPaintValue('circle-radius', styleLayer) + translateDistance(this.getPaintValue('circle-translate', styleLayer));
-            }
-            additionalRadius = Math.max(additionalRadius, styleLayerDistance * pixelsToTileUnits);
-        }
-
-        const queryGeometry = args.queryGeometry.map((q) => {
-            return q.map((p) => {
-                return new Point(p.x, p.y);
-            });
-        });
+        const queryGeometry = args.queryGeometry;
+        const queryPadding = args.queryPadding * pixelsToTileUnits;
 
         let minX = Infinity;
         let minY = Infinity;
@@ -204,28 +120,9 @@ class FeatureIndex {
             }
         }
 
-        const matching = this.grid.query(minX - additionalRadius, minY - additionalRadius, maxX + additionalRadius, maxY + additionalRadius);
+        const matching = this.grid.query(minX - queryPadding, minY - queryPadding, maxX + queryPadding, maxY + queryPadding);
         matching.sort(topDownFeatureComparator);
-        this.filterMatching(result, matching, this.featureIndexArray, queryGeometry, filter, params.layers, styleLayers, args.bearing, pixelsToTileUnits);
-
-        const matchingSymbols = this.collisionTile.queryRenderedSymbols(queryGeometry, args.scale);
-        matchingSymbols.sort();
-        this.filterMatching(result, matchingSymbols, this.collisionTile.collisionBoxArray, queryGeometry, filter, params.layers, styleLayers, args.bearing, pixelsToTileUnits);
-
-        return result;
-    }
-
-    filterMatching(
-        result: {[string]: Array<{ featureIndex: number, feature: GeoJSONFeature }>},
-        matching: Array<any>,
-        array: any,
-        queryGeometry: Array<Array<Point>>,
-        filter: any,
-        filterLayerIDs: Array<string>,
-        styleLayers: {[string]: StyleLayer},
-        bearing: number,
-        pixelsToTileUnits: number
-    ) {
+        const result = {};
         let previousIndex;
         for (let k = 0; k < matching.length; k++) {
             const index = matching[k];
@@ -234,76 +131,105 @@ class FeatureIndex {
             if (index === previousIndex) continue;
             previousIndex = index;
 
-            const match = array.get(index);
-
-            const layerIDs = this.bucketLayerIDs[match.bucketIndex];
-            if (filterLayerIDs && !arraysIntersect(filterLayerIDs, layerIDs)) continue;
-
-            const sourceLayerName = this.sourceLayerCoder.decode(match.sourceLayerIndex);
-            const sourceLayer = this.vtLayers[sourceLayerName];
-            const feature = sourceLayer.feature(match.featureIndex);
-
-            if (!filter(feature)) continue;
-
-            let geometry = null;
-
-            for (let l = 0; l < layerIDs.length; l++) {
-                const layerID = layerIDs[l];
-
-                if (filterLayerIDs && filterLayerIDs.indexOf(layerID) < 0) {
-                    continue;
-                }
-
-                const styleLayer = styleLayers[layerID];
-                if (!styleLayer) continue;
-
-                let translatedPolygon;
-                if (styleLayer.type !== 'symbol') {
-                    // all symbols already match the style
-
-                    if (!geometry) geometry = loadGeometry(feature);
-
-                    if (styleLayer.type === 'line') {
-                        translatedPolygon = translate(queryGeometry,
-                            this.getPaintValue('line-translate', styleLayer, feature),
-                            this.getPaintValue('line-translate-anchor', styleLayer, feature),
-                            bearing, pixelsToTileUnits);
-                        const halfWidth = pixelsToTileUnits / 2 * getLineWidth(
-                            this.getPaintValue('line-width', styleLayer, feature),
-                            this.getPaintValue('line-gap-width', styleLayer, feature));
-                        const lineOffset = this.getPaintValue('line-offset', styleLayer, feature);
-                        if (lineOffset) {
-                            geometry = offsetLine(geometry, lineOffset * pixelsToTileUnits);
-                        }
-                        if (!multiPolygonIntersectsBufferedMultiLine(translatedPolygon, geometry, halfWidth)) continue;
-
-                    } else if (styleLayer.type === 'fill' || styleLayer.type === 'fill-extrusion') {
-                        const typePrefix = styleLayer.type;
-                        translatedPolygon = translate(queryGeometry,
-                            this.getPaintValue(`${typePrefix}-translate`, styleLayer, feature),
-                            this.getPaintValue(`${typePrefix}-translate-anchor`, styleLayer, feature),
-                            bearing, pixelsToTileUnits);
-                        if (!multiPolygonIntersectsMultiPolygon(translatedPolygon, geometry)) continue;
-
-                    } else if (styleLayer.type === 'circle') {
-                        translatedPolygon = translate(queryGeometry,
-                            this.getPaintValue('circle-translate', styleLayer, feature),
-                            this.getPaintValue('circle-translate-anchor', styleLayer, feature),
-                            bearing, pixelsToTileUnits);
-                        const circleRadius = this.getPaintValue('circle-radius', styleLayer, feature) * pixelsToTileUnits;
-                        if (!multiPolygonIntersectsBufferedMultiPoint(translatedPolygon, geometry, circleRadius)) continue;
+            const match = this.featureIndexArray.get(index);
+            let featureGeometry = null;
+            this.loadMatchingFeature(
+                result,
+                match.bucketIndex,
+                match.sourceLayerIndex,
+                match.featureIndex,
+                filter,
+                params.layers,
+                styleLayers,
+                (feature: VectorTileFeature, styleLayer: StyleLayer) => {
+                    if (!featureGeometry) {
+                        featureGeometry = loadGeometry(feature);
                     }
+                    let featureState = {};
+                    if (feature.id) {
+                        // `feature-state` expression evaluation requires feature state to be available
+                        featureState = sourceFeatureState.getState(styleLayer.sourceLayer || '_geojsonTileLayer', feature.id);
+                    }
+                    return styleLayer.queryIntersectsFeature(queryGeometry, feature, featureState, featureGeometry, this.z, args.transform, pixelsToTileUnits, args.posMatrix);
                 }
-
-                const geojsonFeature = new GeoJSONFeature(feature, this.z, this.x, this.y);
-                (geojsonFeature: any).layer = styleLayer.serialize();
-                let layerResult = result[layerID];
-                if (layerResult === undefined) {
-                    layerResult = result[layerID] = [];
-                }
-                layerResult.push({ featureIndex: index, feature: geojsonFeature });
-            }
+            );
         }
+
+        return result;
+    }
+
+    loadMatchingFeature(
+        result: {[string]: Array<{ featureIndex: number, feature: GeoJSONFeature }>},
+        bucketIndex: number,
+        sourceLayerIndex: number,
+        featureIndex: number,
+        filter: FeatureFilter,
+        filterLayerIDs: Array<string>,
+        styleLayers: {[string]: StyleLayer},
+        intersectionTest?: (feature: VectorTileFeature, styleLayer: StyleLayer) => boolean) {
+
+        const layerIDs = this.bucketLayerIDs[bucketIndex];
+        if (filterLayerIDs && !arraysIntersect(filterLayerIDs, layerIDs))
+            return;
+
+        const sourceLayerName = this.sourceLayerCoder.decode(sourceLayerIndex);
+        const sourceLayer = this.vtLayers[sourceLayerName];
+        const feature = sourceLayer.feature(featureIndex);
+
+        if (!filter(new EvaluationParameters(this.tileID.overscaledZ), feature))
+            return;
+
+        for (let l = 0; l < layerIDs.length; l++) {
+            const layerID = layerIDs[l];
+
+            if (filterLayerIDs && filterLayerIDs.indexOf(layerID) < 0) {
+                continue;
+            }
+
+            const styleLayer = styleLayers[layerID];
+            if (!styleLayer) continue;
+
+            if (intersectionTest && !intersectionTest(feature, styleLayer)) {
+                // Only applied for non-symbol features
+                continue;
+            }
+
+            const geojsonFeature = new GeoJSONFeature(feature, this.z, this.x, this.y);
+            (geojsonFeature: any).layer = styleLayer.serialize();
+            let layerResult = result[layerID];
+            if (layerResult === undefined) {
+                layerResult = result[layerID] = [];
+            }
+            layerResult.push({ featureIndex, feature: geojsonFeature });
+        }
+    }
+
+    // Given a set of symbol indexes that have already been looked up,
+    // return a matching set of GeoJSONFeatures
+    lookupSymbolFeatures(symbolFeatureIndexes: Array<number>,
+                         bucketIndex: number,
+                         sourceLayerIndex: number,
+                         filterSpec: FilterSpecification,
+                         filterLayerIDs: Array<string>,
+                         styleLayers: {[string]: StyleLayer}) {
+        const result = {};
+        this.loadVTLayers();
+
+        const filter = featureFilter(filterSpec);
+
+        for (const symbolFeatureIndex of symbolFeatureIndexes) {
+            this.loadMatchingFeature(
+                result,
+                bucketIndex,
+                sourceLayerIndex,
+                symbolFeatureIndex,
+                filter,
+                filterLayerIDs,
+                styleLayers
+            );
+
+        }
+        return result;
     }
 
     hasLayer(id: string) {
@@ -315,84 +241,16 @@ class FeatureIndex {
 
         return false;
     }
-
-    // Get the given paint property value; if a feature is not provided and the
-    // property is data-driven, then default to the maximum value that the
-    // property takes in the (tile, layer) that this FeatureIndex is associated with
-    getPaintValue(property: string, layer: StyleLayer, feature?: VectorTileFeature) {
-        const featureConstant = layer.isPaintValueFeatureConstant(property);
-        if (featureConstant || feature) {
-            const featureProperties = feature ? feature.properties : {};
-            return layer.getPaintValue(property, { zoom: this.z }, featureProperties);
-        }
-
-        assert(property in this.paintPropertyStatistics[layer.id]);
-        return this.paintPropertyStatistics[layer.id][property].max;
-    }
-
 }
 
-module.exports = FeatureIndex;
+register(
+    'FeatureIndex',
+    FeatureIndex,
+    { omit: ['rawTileData', 'sourceLayerCoder'] }
+);
 
-function translateDistance(translate) {
-    return Math.sqrt(translate[0] * translate[0] + translate[1] * translate[1]);
-}
+export default FeatureIndex;
 
 function topDownFeatureComparator(a, b) {
     return b - a;
-}
-
-function getLineWidth(lineWidth, lineGapWidth) {
-    if (lineGapWidth > 0) {
-        return lineGapWidth + 2 * lineWidth;
-    } else {
-        return lineWidth;
-    }
-}
-
-function translate(queryGeometry, translate: any, translateAnchor, bearing, pixelsToTileUnits) {
-    if (!translate[0] && !translate[1]) {
-        return queryGeometry;
-    }
-
-    translate = Point.convert(translate);
-
-    if (translateAnchor === "viewport") {
-        translate._rotate(-bearing);
-    }
-
-    const translated = [];
-    for (let i = 0; i < queryGeometry.length; i++) {
-        const ring = queryGeometry[i];
-        const translatedRing = [];
-        for (let k = 0; k < ring.length; k++) {
-            translatedRing.push(ring[k].sub(translate._mult(pixelsToTileUnits)));
-        }
-        translated.push(translatedRing);
-    }
-    return translated;
-}
-
-function offsetLine(rings, offset) {
-    const newRings = [];
-    const zero = new Point(0, 0);
-    for (let k = 0; k < rings.length; k++) {
-        const ring = rings[k];
-        const newRing = [];
-        for (let i = 0; i < ring.length; i++) {
-            const a = ring[i - 1];
-            const b = ring[i];
-            const c = ring[i + 1];
-            const aToB = i === 0 ? zero : b.sub(a)._unit()._perp();
-            const bToC = i === ring.length - 1 ? zero : c.sub(b)._unit()._perp();
-            const extrude = aToB._add(bToC)._unit();
-
-            const cosHalfAngle = extrude.x * bToC.x + extrude.y * bToC.y;
-            extrude._mult(1 / cosHalfAngle);
-
-            newRing.push(extrude._mult(offset)._add(b));
-        }
-        newRings.push(newRing);
-    }
-    return newRings;
 }

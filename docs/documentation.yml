@@ -5,17 +5,21 @@ toc:
   - version
   - setRTLTextPlugin
   - AnimationOptions
+  - CameraOptions
+  - PaddingOptions
+  - RequestParameters
+  - CustomLayerInterface
   - name: Geography & Geometry
     description: |
       `LngLat` and `LngLatBounds` represent points and rectanges in geographic
       coordinates. `Point` represents points in screen coordinates.
-  - CameraOptions
   - LngLat
   - LngLatLike
   - LngLatBounds
   - LngLatBoundsLike
   - Point
   - PointLike
+  - MercatorCoordinate
   - name: User Interface
     description: |
       Controls, markers, and popups add new user interface elements to the map.
@@ -47,10 +51,11 @@ toc:
   - VideoSource
   - ImageSource
   - CanvasSource
+  - CanvasSourceOptions
   - name: Events
     description: |
-      `Evented` is Mapbox GL JS's event system. It is sometimes extended when
-      implementing [IControls](#IControl) and other extensions.
+      `Map` (and some other classes) emit events in response to user interactions or changes in state. `Evented`
+      is the interface used to bind and unbind listeners for these events.
   - Evented
   - MapMouseEvent
   - MapTouchEvent

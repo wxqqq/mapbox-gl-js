@@ -1,28 +1,31 @@
 // @flow
 
-const ajax = require('../util/ajax');
-const vt = require('@mapbox/vector-tile');
-const Protobuf = require('pbf');
-const WorkerTile = require('./worker_tile');
-const util = require('../util/util');
+import { getArrayBuffer } from '../util/ajax';
+
+import vt from '@mapbox/vector-tile';
+import Protobuf from 'pbf';
+import WorkerTile from './worker_tile';
+import { extend } from '../util/util';
+import performance from '../util/performance';
 
 import type {
     WorkerSource,
     WorkerTileParameters,
     WorkerTileCallback,
-    TileParameters,
-    RedoPlacementParameters,
-    RedoPlacementCallback,
+    TileParameters
 } from '../source/worker_source';
 
+import type {PerformanceResourceTiming} from '../types/performance_resource_timing';
 import type Actor from '../util/actor';
 import type StyleLayerIndex from '../style/style_layer_index';
+import type {Callback} from '../types/callback';
 
 export type LoadVectorTileResult = {
     vectorTile: VectorTile;
     rawData: ArrayBuffer;
     expires?: any;
     cacheControl?: any;
+    resourceTiming?: Array<PerformanceResourceTiming>;
 };
 
 /**
@@ -40,19 +43,22 @@ export type LoadVectorData = (params: WorkerTileParameters, callback: LoadVector
  * @private
  */
 function loadVectorTile(params: WorkerTileParameters, callback: LoadVectorDataCallback) {
-    const xhr = ajax.getArrayBuffer(params.request, (err, response) => {
+    const request = getArrayBuffer(params.request, (err: ?Error, data: ?ArrayBuffer, cacheControl: ?string, expires: ?string) => {
         if (err) {
             callback(err);
-        } else if (response) {
+        } else if (data) {
             callback(null, {
-                vectorTile: new vt.VectorTile(new Protobuf(response.data)),
-                rawData: response.data,
-                cacheControl: response.cacheControl,
-                expires: response.expires
+                vectorTile: new vt.VectorTile(new Protobuf(data)),
+                rawData: data,
+                cacheControl,
+                expires
             });
         }
     });
-    return () => { xhr.abort(); };
+    return () => {
+        request.cancel();
+        callback();
+    };
 }
 
 /**
@@ -68,8 +74,8 @@ class VectorTileWorkerSource implements WorkerSource {
     actor: Actor;
     layerIndex: StyleLayerIndex;
     loadVectorData: LoadVectorData;
-    loading: { [string]: { [string]: WorkerTile } };
-    loaded: { [string]: { [string]: WorkerTile } };
+    loading: { [string]: WorkerTile };
+    loaded: { [string]: WorkerTile };
 
     /**
      * @param [loadVectorData] Optional method for custom loading of a VectorTile
@@ -91,17 +97,21 @@ class VectorTileWorkerSource implements WorkerSource {
      * a `params.url` property) for fetching and producing a VectorTile object.
      */
     loadTile(params: WorkerTileParameters, callback: WorkerTileCallback) {
-        const source = params.source,
-            uid = params.uid;
+        const uid = params.uid;
 
-        if (!this.loading[source])
-            this.loading[source] = {};
+        if (!this.loading)
+            this.loading = {};
 
-        const workerTile = this.loading[source][uid] = new WorkerTile(params);
+        const perf = (params && params.request && params.request.collectResourceTiming) ?
+            new performance.Performance(params.request) : false;
+
+        const workerTile = this.loading[uid] = new WorkerTile(params);
         workerTile.abort = this.loadVectorData(params, (err, response) => {
-            delete this.loading[source][uid];
+            delete this.loading[uid];
 
             if (err || !response) {
+                workerTile.status = 'done';
+                this.loaded[uid] = workerTile;
                 return callback(err);
             }
 
@@ -110,18 +120,25 @@ class VectorTileWorkerSource implements WorkerSource {
             if (response.expires) cacheControl.expires = response.expires;
             if (response.cacheControl) cacheControl.cacheControl = response.cacheControl;
 
+            const resourceTiming = {};
+            if (perf) {
+                const resourceTimingData = perf.finish();
+                // it's necessary to eval the result of getEntriesByName() here via parse/stringify
+                // late evaluation in the main thread causes TypeError: illegal invocation
+                if (resourceTimingData)
+                    resourceTiming.resourceTiming = JSON.parse(JSON.stringify(resourceTimingData));
+            }
+
             workerTile.vectorTile = response.vectorTile;
-            workerTile.parse(response.vectorTile, this.layerIndex, this.actor, (err, result, transferrables) => {
+            workerTile.parse(response.vectorTile, this.layerIndex, this.actor, (err, result) => {
                 if (err || !result) return callback(err);
 
-                // Not transferring rawTileData because the worker needs to retain its copy.
-                callback(null,
-                    util.extend({rawTileData}, result, cacheControl),
-                    transferrables);
+                // Transferring a copy of rawTileData because the worker needs to retain its copy.
+                callback(null, extend({rawTileData: rawTileData.slice(0)}, result, cacheControl, resourceTiming));
             });
 
-            this.loaded[source] = this.loaded[source] || {};
-            this.loaded[source][uid] = workerTile;
+            this.loaded = this.loaded || {};
+            this.loaded[uid] = workerTile;
         });
     }
 
@@ -129,28 +146,32 @@ class VectorTileWorkerSource implements WorkerSource {
      * Implements {@link WorkerSource#reloadTile}.
      */
     reloadTile(params: WorkerTileParameters, callback: WorkerTileCallback) {
-        const loaded = this.loaded[params.source],
+        const loaded = this.loaded,
             uid = params.uid,
             vtSource = this;
         if (loaded && loaded[uid]) {
             const workerTile = loaded[uid];
+            workerTile.showCollisionBoxes = params.showCollisionBoxes;
+
+            const done = (err, data) => {
+                const reloadCallback = workerTile.reloadCallback;
+                if (reloadCallback) {
+                    delete workerTile.reloadCallback;
+                    workerTile.parse(workerTile.vectorTile, vtSource.layerIndex, vtSource.actor, reloadCallback);
+                }
+                callback(err, data);
+            };
 
             if (workerTile.status === 'parsing') {
-                workerTile.reloadCallback = callback;
+                workerTile.reloadCallback = done;
             } else if (workerTile.status === 'done') {
-                workerTile.parse(workerTile.vectorTile, this.layerIndex, this.actor, done.bind(workerTile));
+                // if there was no vector tile data on the initial load, don't try and re-parse tile
+                if (workerTile.vectorTile) {
+                    workerTile.parse(workerTile.vectorTile, this.layerIndex, this.actor, done);
+                } else {
+                    done();
+                }
             }
-
-        }
-
-        function done(err, data) {
-            if (this.reloadCallback) {
-                const reloadCallback = this.reloadCallback;
-                delete this.reloadCallback;
-                this.parse(this.vectorTile, vtSource.layerIndex, vtSource.actor, reloadCallback);
-            }
-
-            callback(err, data);
         }
     }
 
@@ -158,50 +179,32 @@ class VectorTileWorkerSource implements WorkerSource {
      * Implements {@link WorkerSource#abortTile}.
      *
      * @param params
-     * @param params.source The id of the source for which we're loading this tile.
      * @param params.uid The UID for this tile.
      */
-    abortTile(params: TileParameters) {
-        const loading = this.loading[params.source],
+    abortTile(params: TileParameters, callback: WorkerTileCallback) {
+        const loading = this.loading,
             uid = params.uid;
         if (loading && loading[uid] && loading[uid].abort) {
             loading[uid].abort();
             delete loading[uid];
         }
+        callback();
     }
 
     /**
      * Implements {@link WorkerSource#removeTile}.
      *
      * @param params
-     * @param params.source The id of the source for which we're loading this tile.
      * @param params.uid The UID for this tile.
      */
-    removeTile(params: TileParameters) {
-        const loaded = this.loaded[params.source],
+    removeTile(params: TileParameters, callback: WorkerTileCallback) {
+        const loaded = this.loaded,
             uid = params.uid;
         if (loaded && loaded[uid]) {
             delete loaded[uid];
         }
-    }
-
-    redoPlacement(params: RedoPlacementParameters, callback: RedoPlacementCallback) {
-        const loaded = this.loaded[params.source],
-            loading = this.loading[params.source],
-            uid = params.uid;
-
-        if (loaded && loaded[uid]) {
-            const workerTile = loaded[uid];
-            const result = workerTile.redoPlacement(params.angle, params.pitch, params.cameraToCenterDistance, params.cameraToTileDistance, params.showCollisionBoxes);
-
-            if (result.result) {
-                callback(null, result.result, result.transferables);
-            }
-
-        } else if (loading && loading[uid]) {
-            loading[uid].angle = params.angle;
-        }
+        callback();
     }
 }
 
-module.exports = VectorTileWorkerSource;
+export default VectorTileWorkerSource;
